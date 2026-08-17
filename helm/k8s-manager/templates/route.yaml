@@ -1,0 +1,27 @@
+{{- if .Values.openshiftRoute.enabled }}
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: {{ include "k8s-manager.fullname" . }}
+  labels:
+    {{- include "k8s-manager.labels" . | nindent 4 }}
+  {{- with .Values.openshiftRoute.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.openshiftRoute.host }}
+  host: {{ . | quote }}
+  {{- end }}
+  to:
+    kind: Service
+    name: {{ include "k8s-manager.fullname" . }}
+    weight: 100
+  port:
+    targetPort: http
+  {{- if .Values.openshiftRoute.tls.enabled }}
+  tls:
+    termination: {{ .Values.openshiftRoute.tls.termination }}
+    insecureEdgeTerminationPolicy: {{ .Values.openshiftRoute.tls.insecureEdgeTerminationPolicy }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: k8s-manager
+description: Namespace-scoped Kubernetes REST PoC on Open Liberty
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
