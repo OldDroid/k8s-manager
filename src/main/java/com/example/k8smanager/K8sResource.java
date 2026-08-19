@@ -1,5 +1,6 @@
 package com.example.k8smanager;
 
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -7,6 +8,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +23,7 @@ import io.kubernetes.client.openapi.models.V1Deployment;
 import io.kubernetes.client.openapi.models.V1OwnerReference;
 import io.kubernetes.client.openapi.models.V1Pod;
 import io.kubernetes.client.util.Config;
+import io.kubernetes.client.util.KubeConfig;
 import jakarta.ws.rs.DefaultValue;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.PUT;
@@ -70,20 +73,63 @@ public class K8sResource {
 
     private static volatile ApiClient apiClient;
 
+    /**
+     * In-cluster the mounted service account wins. Outside a cluster ({@code mvn liberty:dev}) an
+     * explicit override comes next, then the current kubeconfig context — so a local run targets the
+     * same namespace as {@code oc project} / {@code kubectl config set-context --current --namespace}.
+     */
     private static String detectNamespace() {
-        try {
-            if (Files.isReadable(SA_NAMESPACE_FILE)) {
-                var ns = Files.readString(SA_NAMESPACE_FILE).trim();
-                if (!ns.isBlank()) {
-                    return ns;
-                }
-            }
-        } catch (IOException ignored) {
-            // fall through to the environment variable
-        }
-        return Optional.ofNullable(System.getenv("KUBERNETES_NAMESPACE"))
-                .filter(ns -> !ns.isBlank())
+        return serviceAccountNamespace()
+                .or(() -> nonBlank(System.getenv("KUBERNETES_NAMESPACE")))
+                .or(K8sResource::kubeconfigNamespace)
                 .orElse("default");
+    }
+
+    private static Optional<String> serviceAccountNamespace() {
+        try {
+            return Files.isReadable(SA_NAMESPACE_FILE)
+                    ? nonBlank(Files.readString(SA_NAMESPACE_FILE))
+                    : Optional.empty();
+        } catch (IOException e) {
+            return Optional.empty();
+        }
+    }
+
+    /** Current-context namespace from $KUBECONFIG (first usable entry) or ~/.kube/config. */
+    private static Optional<String> kubeconfigNamespace() {
+        for (var candidate : kubeconfigCandidates()) {
+            if (!Files.isReadable(candidate)) {
+                continue;
+            }
+            try (var reader = Files.newBufferedReader(candidate)) {
+                var namespace = nonBlank(KubeConfig.loadKubeConfig(reader).getNamespace());
+                if (namespace.isPresent()) {
+                    return namespace;
+                }
+            } catch (IOException | RuntimeException e) {
+                // unreadable or malformed kubeconfig: fall through to the next candidate
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static List<java.nio.file.Path> kubeconfigCandidates() {
+        var configured = System.getenv("KUBECONFIG");
+        if (configured == null || configured.isBlank()) {
+            return List.of(java.nio.file.Path.of(
+                    System.getProperty("user.home"), KubeConfig.KUBEDIR, KubeConfig.KUBECONFIG));
+        }
+        var paths = new ArrayList<java.nio.file.Path>();
+        for (var entry : configured.split(File.pathSeparator)) {
+            if (!entry.isBlank()) {
+                paths.add(java.nio.file.Path.of(entry.trim()));
+            }
+        }
+        return paths;
+    }
+
+    private static Optional<String> nonBlank(String value) {
+        return Optional.ofNullable(value).map(String::trim).filter(v -> !v.isEmpty());
     }
 
     /** Lazily builds (and caches) the in-cluster client; also works against a local kubeconfig. */
