@@ -53,6 +53,84 @@ Container image:
 docker build -t k8s-manager:1.0.0 .
 ```
 
+## Local development (`mvn liberty:dev`)
+
+`Config.defaultClient()` resolves credentials in this order: `$KUBECONFIG` → `~/.kube/config` →
+in-cluster service account. Locally the kubeconfig wins, so the app authenticates as **your** user
+with no extra configuration.
+
+Namespace resolution mirrors that: service account file → `$KUBERNETES_NAMESPACE` →
+**kubeconfig current-context namespace** → `default`. So `oc project <ns>` is enough to retarget a
+local run, and `GET /api/health` echoes back which namespace was picked.
+
+```bash
+oc project mattermost
+```
+
+```bash
+mvn liberty:dev
+```
+
+### Option A — run as yourself (fastest)
+
+`kubeadmin` on CRC is cluster-admin, so nothing is required. Convenient, but it proves nothing about
+whether the chart's `Role` is sufficient. To run as yourself with exactly the pod's permissions,
+install the Role and bind it to your user:
+
+```bash
+helm template k8s-manager ./helm/k8s-manager -n mattermost -s templates/role.yaml | oc apply -f -
+```
+
+```bash
+oc create rolebinding k8s-manager-dev --role=k8s-manager --user=$(oc whoami) -n mattermost
+```
+
+### Option B — run as the ServiceAccount (faithful)
+
+This is the one that actually validates the chart's RBAC before you deploy. Create the SA, Role and
+RoleBinding, then mint a short-lived token into a throwaway kubeconfig:
+
+```bash
+helm template k8s-manager ./helm/k8s-manager -n mattermost -s templates/serviceaccount.yaml -s templates/role.yaml -s templates/rolebinding.yaml | oc apply -f -
+```
+
+```bash
+kubectl config --kubeconfig=dev-kubeconfig.yaml set-cluster crc --server=https://api.crc.testing:6443 --insecure-skip-tls-verify=true
+```
+
+```bash
+kubectl config --kubeconfig=dev-kubeconfig.yaml set-credentials k8s-manager-sa --token=$(oc create token k8s-manager -n mattermost --duration=8h)
+```
+
+```bash
+kubectl config --kubeconfig=dev-kubeconfig.yaml set-context dev --cluster=crc --user=k8s-manager-sa --namespace=mattermost
+```
+
+```bash
+kubectl config --kubeconfig=dev-kubeconfig.yaml use-context dev
+```
+
+```bash
+KUBECONFIG=dev-kubeconfig.yaml mvn liberty:dev
+```
+
+A kubeconfig token is bound to `AccessTokenAuthentication` — read once, never refreshed. When the
+8h duration lapses you get 401s until you restart. Only the in-cluster path uses the refreshing
+`TokenFileAuthentication`. Add `dev-kubeconfig.yaml` to `.gitignore`; it holds a real token.
+
+### Verifying the Role is complete
+
+```bash
+oc auth can-i --list --as=system:serviceaccount:mattermost:k8s-manager -n mattermost
+```
+
+Each endpoint maps to one check — `get/list pods`, `list replicasets`, `get deployments`,
+`update deployments/scale`:
+
+```bash
+oc auth can-i update deployments/scale --as=system:serviceaccount:mattermost:k8s-manager -n mattermost
+```
+
 ## Deploy on k3s
 
 ```bash
